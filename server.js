@@ -1,13 +1,14 @@
 import express from 'express';
 import bodyParser from 'body-parser';
 import Stripe from 'stripe';
+import fetch from 'node-fetch'; // Node 18+ has fetch built-in, remove if using latest Node
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// In-memory storage for demonstration (use a database in production)
+// In-memory storage for demo (replace with DB for production)
 const processedEvents = new Set();
 const stripeEvents = [];
 
@@ -102,7 +103,7 @@ async function processCheckoutCompleted(session) {
     currency: session.currency
   };
 
-  // Check for PHENOM100 coupon
+  // PHENOM100 coupon detection
   if (session.total_details?.breakdown?.discounts) {
     for (const discount of session.total_details.breakdown.discounts) {
       if (discount.discount?.coupon?.id === 'PHENOM100') {
@@ -128,13 +129,26 @@ async function processCheckoutCompleted(session) {
 }
 
 async function storeSubscription(record) {
-  console.log('📊 Storing subscription record:', record);
-
-  // Simulate Airtable API
-  /*
   const airtablePayload = {
-    records: [{ fields: { ... } }]
+    records: [{
+      fields: {
+        'Customer ID': record.customer_id,
+        'Subscription ID': record.subscription_id,
+        'Price ID': record.price_id,
+        'Product ID': record.product_id,
+        'Phenom Code': record.phenom_code,
+        'Phenom Partner': record.phenom_partner,
+        'Source Channel': record.source_channel,
+        'UTM Source': record.utm_source,
+        'UTM Medium': record.utm_medium,
+        'UTM Campaign': record.utm_campaign,
+        'Amount': record.amount_total,
+        'Currency': record.currency,
+        'Created': record.created_at
+      }
+    }]
   };
+
   const response = await fetch(`https://api.airtable.com/v0/${process.env.AIRTABLE_BASE_ID}/Subscriptions`, {
     method: 'POST',
     headers: {
@@ -143,8 +157,12 @@ async function storeSubscription(record) {
     },
     body: JSON.stringify(airtablePayload)
   });
-  if (!response.ok) throw new Error(`Airtable API error: ${response.statusText}`);
-  */
+
+  if (!response.ok) {
+    throw new Error(`Airtable API error: ${response.statusText}`);
+  }
+
+  console.log('🎯 Stored subscription in Airtable:', record.subscription_id);
 }
 
 // Start server
