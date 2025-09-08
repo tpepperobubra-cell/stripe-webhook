@@ -1,19 +1,12 @@
 {
-  "name": "stripe-webhook-receiver",
+  "name": "stripe-webhook-vercel",
   "version": "1.0.0",
-  "description": "Stripe webhook receiver with signature verification and idempotency",
-  "main": "webhook-receiver.js",
+  "type": "module",
   "scripts": {
-    "start": "node webhook-receiver.js",
-    "dev": "nodemon webhook-receiver.js",
-    "test": "node test-webhook.js"
+    "dev": "vercel dev",
+    "build": "echo 'No build step required'"
   },
   "dependencies": {
-    "express": "^4.18.2",
-    "stripe": "^14.5.0",
-    "axios": "^1.6.0"
-  },
-  "devDependencies": {
-    "nodemon": "^3.0.1"
+    "stripe": "^14.5.0"
   }
 }
