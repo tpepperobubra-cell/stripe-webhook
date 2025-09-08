@@ -2,7 +2,6 @@ import express from 'express';
 import bodyParser from 'body-parser';
 import Stripe from 'stripe';
 
-
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
 const app = express();
@@ -149,6 +148,7 @@ async function storeSubscription(record) {
     }]
   };
 
+  // Using built-in fetch (available in Node.js 18+)
   const response = await fetch(`https://api.airtable.com/v0/${process.env.AIRTABLE_BASE_ID}/Subscriptions`, {
     method: 'POST',
     headers: {
