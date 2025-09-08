@@ -1,7 +1,7 @@
 import express from 'express';
 import bodyParser from 'body-parser';
 import Stripe from 'stripe';
-import fetch from 'node-fetch'; // Node 18+ has fetch built-in, remove if using latest Node
+
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
