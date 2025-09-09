@@ -2,6 +2,7 @@
 import express from "express";
 import Stripe from "stripe";
 import "dotenv/config"; // load .env locally
+import fetch from "node-fetch";
 
 const app = express();
 const port = process.env.PORT || 8080;
@@ -12,8 +13,9 @@ const stripe = new Stripe(process.env.STRIPE_SECRET_KEY, {
 });
 
 const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
+const zapierWebhookUrl = process.env.ZAPIER_WEBHOOK_URL;
 
-// Root health endpoint (Railway pings)
+// Root health endpoint
 app.get("/", (req, res) => {
   res.json({ ok: true, message: "Server alive", timestamp: new Date() });
 });
@@ -23,12 +25,11 @@ app.get("/api/debug", (req, res) => {
   res.json({
     stripe_key_set: !!process.env.STRIPE_SECRET_KEY,
     webhook_secret_set: !!process.env.STRIPE_WEBHOOK_SECRET,
-    airtable_base_set: !!process.env.AIRTABLE_BASE_ID,
-    airtable_key_set: !!process.env.AIRTABLE_API_KEY,
+    zapier_webhook_set: !!process.env.ZAPIER_WEBHOOK_URL,
   });
 });
 
-// Stripe webhook (raw body)
+// Stripe webhook (raw body required)
 app.post(
   "/webhook",
   express.raw({ type: "application/json" }),
@@ -75,65 +76,52 @@ async function processCheckoutCompleted(event) {
       subscription = await stripe.subscriptions.retrieve(session.subscription);
     }
 
-    await storeSubscription(session, customer, subscription);
-    console.log("✅ Session stored in Airtable");
+    await sendToZapier(session, customer, subscription);
+    console.log("✅ Session sent to Zapier");
   } catch (err) {
-    console.error("❌ Failed to store session:", err);
+    console.error("❌ Failed to send session to Zapier:", err);
   }
 }
 
-// --- Airtable integration ---
-async function storeSubscription(session, customer = null, subscription = null) {
-  const { AIRTABLE_BASE_ID, AIRTABLE_API_KEY } = process.env;
-  if (!AIRTABLE_BASE_ID || !AIRTABLE_API_KEY) {
-    throw new Error("Missing Airtable credentials");
-  }
+// --- Zapier integration ---
+async function sendToZapier(session, customer = null, subscription = null) {
+  if (!zapierWebhookUrl) throw new Error("Missing Zapier webhook URL");
 
-  const tableName = "Stripe Signups"; // Existing table
-  const url = `https://api.airtable.com/v0/${AIRTABLE_BASE_ID}/${encodeURIComponent(
-    tableName
-  )}`;
-
-  // Only include fields that exist in your table
-  const recordFields = {
-    "Session ID": session.id,
-    "Customer Email": session.customer_details?.email || session.customer_email || "",
-    "Customer Name": session.customer_details?.name || customer?.name || "",
-    "Stripe Customer ID": session.customer || "",
-    "Stripe Subscription ID": session.subscription || "",
-    "Amount Total": session.amount_total ? session.amount_total / 100 : 0,
-    "Currency": session.currency?.toUpperCase() || "",
-    "Payment Status": session.payment_status || "",
-    "Plan Name":
+  const payload = {
+    session_id: session.id,
+    customer_email: session.customer_details?.email || session.customer_email || "",
+    customer_name: session.customer_details?.name || customer?.name || "",
+    stripe_customer_id: session.customer || "",
+    stripe_subscription_id: session.subscription || "",
+    amount_total: session.amount_total ? session.amount_total / 100 : 0,
+    currency: session.currency?.toUpperCase() || "",
+    payment_status: session.payment_status || "",
+    plan_name:
       subscription?.items?.data?.[0]?.price?.nickname ||
       subscription?.items?.data?.[0]?.price?.id ||
       "",
-    "Subscription Status": subscription?.status || "",
-    "Created At": new Date().toISOString(),
-    "Promo Code": session.total_details?.breakdown?.discounts?.[0]?.discount?.coupon?.id || "",
-    "UTM Source": session.metadata?.utm_source || "",
-    "UTM Medium": session.metadata?.utm_medium || "",
-    "UTM Campaign": session.metadata?.utm_campaign || "",
-    "Source Channel": session.metadata?.source_channel || "",
+    subscription_status: subscription?.status || "",
+    created_at: new Date().toISOString(),
+    promo_code: session.total_details?.breakdown?.discounts?.[0]?.discount?.coupon?.id || "",
+    utm_source: session.metadata?.utm_source || "",
+    utm_medium: session.metadata?.utm_medium || "",
+    utm_campaign: session.metadata?.utm_campaign || "",
+    source_channel: session.metadata?.source_channel || "",
   };
 
-  const res = await fetch(url, {
+  const res = await fetch(zapierWebhookUrl, {
     method: "POST",
-    headers: {
-      Authorization: `Bearer ${AIRTABLE_API_KEY}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({ records: [{ fields: recordFields }] }),
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
   });
 
   if (!res.ok) {
-    const errorText = await res.text();
-    throw new Error(`Airtable insert failed: ${errorText}`);
+    const text = await res.text();
+    throw new Error(`Zapier webhook failed: ${text}`);
   }
 
-  const data = await res.json();
-  console.log("✅ Airtable response:", data);
-  return data;
+  console.log("✅ Zapier webhook call successful");
+  return await res.json();
 }
 
 // Start server
