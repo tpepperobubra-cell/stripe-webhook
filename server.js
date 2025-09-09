@@ -16,6 +16,25 @@ app.post('/api/webhook', express.raw({ type: 'application/json' }), async (req, 
   const sig = req.headers['stripe-signature'];
   let event;
 
+  // Debug logging
+  console.log('🔍 Webhook received:');
+  console.log('- Body type:', typeof req.body);
+  console.log('- Body is Buffer:', Buffer.isBuffer(req.body));
+  console.log('- Body length:', req.body?.length);
+  console.log('- Signature present:', !!sig);
+  console.log('- Signature value:', sig ? sig.substring(0, 20) + '...' : 'MISSING');
+  console.log('- Webhook secret set:', !!process.env.STRIPE_WEBHOOK_SECRET);
+
+  if (!sig) {
+    console.error('❌ No Stripe signature header found');
+    return res.status(400).send('No Stripe signature header found');
+  }
+
+  if (!req.body || req.body.length === 0) {
+    console.error('❌ Empty request body');
+    return res.status(400).send('Empty request body');
+  }
+
   try {
     event = stripe.webhooks.constructEvent(
       req.body,
@@ -25,6 +44,7 @@ app.post('/api/webhook', express.raw({ type: 'application/json' }), async (req, 
     console.log('✅ Webhook signature verified for event:', event.id);
   } catch (err) {
     console.error('❌ Signature verification failed:', err.message);
+    console.error('❌ Body preview:', req.body.toString().substring(0, 100));
     return res.status(400).send(`Webhook Error: ${err.message}`);
   }
 
@@ -64,6 +84,14 @@ app.post('/api/webhook', express.raw({ type: 'application/json' }), async (req, 
 
 // Apply JSON middleware for all other routes AFTER the webhook route
 app.use(express.json());
+
+// Root route for health checks
+app.get('/', (req, res) => {
+  res.json({ 
+    status: 'Stripe webhook server running',
+    timestamp: new Date().toISOString()
+  });
+});
 
 // Health check
 app.get('/api/webhook', (req, res) => {
