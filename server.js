@@ -144,7 +144,7 @@ async function sendToZapier(session, customer = null, subscription = null) {
 // --- Heartbeat every 1 second ---
 setInterval(() => {
   console.log("💓 Heartbeat - server alive");
-}, 1000);
+}, 50000);
 
 // --- Start server ---
 app.listen(port, "0.0.0.0", () => {
