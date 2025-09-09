@@ -13,7 +13,7 @@ const stripe = new Stripe(process.env.STRIPE_SECRET_KEY, {
 const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
 
 // Middleware
-app.use("/webhook", express.raw({ type: "application/json" }));
+app.use("/api/webhook", express.raw({ type: "application/json" }));
 app.use(express.json());
 
 // Graceful shutdown handling
