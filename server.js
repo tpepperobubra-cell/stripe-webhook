@@ -6,7 +6,7 @@ const app = express();
 const port = process.env.PORT || 8080;
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY, {
-  apiVersion: "2023-10-16", // Use a stable API version
+  apiVersion: "2023-10-16", // Use a stable API version to avoid issues with "2025-06-30.basil"
 });
 
 // Airtable setup
@@ -40,8 +40,10 @@ app.post(
       signature: sig || "Missing",
       bodyType: typeof req.body,
       isBuffer: Buffer.isBuffer(req.body),
-      bodyPreview: req.body?.toString().slice(0, 100),
-      webhookSecret: process.env.STRIPE_WEBHOOK_SECRET ? "Set" : "Missing",
+      bodyLength: req.body?.length,
+      bodyPreview: req.body ? req.body.toString().slice(0, 100) : "Empty",
+      webhookSecret: process.env.STRIPE_WEBHOOK_SECRET ? "Set (hidden)" : "Missing",
+      headers: req.headers, // Log all headers for inspection
     });
 
     try {
@@ -68,7 +70,7 @@ app.post(
           ]);
           console.log("📦 Airtable record created:", created[0].id);
         } catch (err) {
-          console.error("❌ Airtable insert failed:", err.message);
+          console.error("❌ Airtable insert failed:", err.message, err.stack);
         }
       }
 
