@@ -46,7 +46,7 @@ app.get("/api/debug", (req, res) => {
 
 // --- Stripe Webhook endpoint ---
 app.post(
-  "/webhook",
+  "/api/webhook",
   express.raw({ type: "application/json" }),
   async (req, res) => {
     const sig = req.headers["stripe-signature"];
