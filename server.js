@@ -27,6 +27,21 @@ function stripeForEvent(event) {
   return getStripeInstance(key);
 }
 
+// --- Track idle time for heartbeat ---
+let lastRequestTime = Date.now();
+app.use((req, res, next) => {
+  lastRequestTime = Date.now();
+  next();
+});
+
+// --- Heartbeat for idle periods (every second) ---
+setInterval(() => {
+  const idleTime = Date.now() - lastRequestTime;
+  if (idleTime >= 60000) { // 60 seconds idle
+    console.log("💓 Heartbeat - server idle, keeping alive");
+  }
+}, 1000);
+
 // --- Health endpoint ---
 app.get("/", (req, res) => {
   res.json({ ok: true, message: "Server alive", timestamp: new Date() });
@@ -46,7 +61,7 @@ app.get("/api/debug", (req, res) => {
 
 // --- Stripe Webhook endpoint ---
 app.post(
-  "/api/webhook",
+  "/webhook",
   express.raw({ type: "application/json" }),
   async (req, res) => {
     const sig = req.headers["stripe-signature"];
@@ -140,11 +155,6 @@ async function sendToZapier(session, customer = null, subscription = null) {
     throw new Error(`Zapier webhook failed: ${text}`);
   }
 }
-
-// --- Heartbeat every 1 second ---
-setInterval(() => {
-  console.log("💓 Heartbeat - server alive");
-}, 50000);
 
 // --- Start server ---
 app.listen(port, "0.0.0.0", () => {
