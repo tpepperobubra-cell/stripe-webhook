@@ -10,63 +10,60 @@ const PORT = process.env.PORT || 3000;
 const processedEvents = new Set();
 const stripeEvents = [];
 
-// Use express.raw() for webhook route specifically
-app.use('/api/webhook', express.raw({ type: 'application/json' }));
+// CRITICAL: Handle webhook route BEFORE any other middleware
+// This ensures the raw body is preserved for Stripe signature verification
+app.post('/api/webhook', express.raw({ type: 'application/json' }), async (req, res) => {
+  const sig = req.headers['stripe-signature'];
+  let event;
 
-// Use express.json() for all other routes
-app.use(express.json());
-
-// Stripe webhook endpoint
-app.post('/api/webhook', async (req, res) => {
-    const sig = req.headers['stripe-signature'];
-    let event;
-
-    try {
-      event = stripe.webhooks.constructEvent(
-        req.body,
-        sig,
-        process.env.STRIPE_WEBHOOK_SECRET
-      );
-      console.log('✅ Webhook signature verified for event:', event.id);
-    } catch (err) {
-      console.error('❌ Signature verification failed:', err.message);
-      return res.status(400).send(`Webhook Error: ${err.message}`);
-    }
-
-    // Idempotency check
-    if (processedEvents.has(event.id)) {
-      console.log(`🔄 Event ${event.id} already processed - SKIPPING`);
-      return res.json({ received: true, processed: false, reason: 'duplicate', event_id: event.id });
-    }
-
-    try {
-      const rawEventRecord = {
-        event_id: event.id,
-        type: event.type,
-        created: event.created,
-        raw_payload: event,
-        processed_at: new Date().toISOString(),
-        retry_detected: false
-      };
-
-      stripeEvents.push(rawEventRecord);
-      processedEvents.add(event.id);
-      console.log('📝 Raw event logged:', event.id, event.type);
-
-      if (event.type === 'checkout.session.completed') {
-        await processCheckoutCompleted(event.data.object);
-      }
-
-      console.log(`✅ Successfully processed event: ${event.id}`);
-      res.json({ received: true, processed: true, event_id: event.id, event_type: event.type });
-
-    } catch (error) {
-      console.error('❌ Error processing webhook:', error);
-      processedEvents.delete(event.id);
-      res.status(500).json({ error: 'Processing failed', event_id: event.id });
-    }
+  try {
+    event = stripe.webhooks.constructEvent(
+      req.body,
+      sig,
+      process.env.STRIPE_WEBHOOK_SECRET
+    );
+    console.log('✅ Webhook signature verified for event:', event.id);
+  } catch (err) {
+    console.error('❌ Signature verification failed:', err.message);
+    return res.status(400).send(`Webhook Error: ${err.message}`);
   }
-);
+
+  // Idempotency check
+  if (processedEvents.has(event.id)) {
+    console.log(`🔄 Event ${event.id} already processed - SKIPPING`);
+    return res.json({ received: true, processed: false, reason: 'duplicate', event_id: event.id });
+  }
+
+  try {
+    const rawEventRecord = {
+      event_id: event.id,
+      type: event.type,
+      created: event.created,
+      raw_payload: event,
+      processed_at: new Date().toISOString(),
+      retry_detected: false
+    };
+
+    stripeEvents.push(rawEventRecord);
+    processedEvents.add(event.id);
+    console.log('📝 Raw event logged:', event.id, event.type);
+
+    if (event.type === 'checkout.session.completed') {
+      await processCheckoutCompleted(event.data.object);
+    }
+
+    console.log(`✅ Successfully processed event: ${event.id}`);
+    res.json({ received: true, processed: true, event_id: event.id, event_type: event.type });
+
+  } catch (error) {
+    console.error('❌ Error processing webhook:', error);
+    processedEvents.delete(event.id);
+    res.status(500).json({ error: 'Processing failed', event_id: event.id });
+  }
+});
+
+// Apply JSON middleware for all other routes AFTER the webhook route
+app.use(express.json());
 
 // Health check
 app.get('/api/webhook', (req, res) => {
@@ -79,6 +76,17 @@ app.get('/api/webhook', (req, res) => {
       type: e.type,
       processed_at: e.processed_at
     }))
+  });
+});
+
+// Debug route to check environment variables (remove in production)
+app.get('/api/debug', (req, res) => {
+  res.json({
+    stripe_key_set: !!process.env.STRIPE_SECRET_KEY,
+    webhook_secret_set: !!process.env.STRIPE_WEBHOOK_SECRET,
+    webhook_secret_starts_with: process.env.STRIPE_WEBHOOK_SECRET?.substring(0, 6),
+    airtable_base_set: !!process.env.AIRTABLE_BASE_ID,
+    airtable_key_set: !!process.env.AIRTABLE_API_KEY
   });
 });
 
@@ -170,4 +178,8 @@ async function storeSubscription(record) {
 // Start server
 app.listen(PORT, () => {
   console.log(`🚀 Server listening on port ${PORT}`);
+  console.log(`Environment check:`);
+  console.log(`- Stripe key set: ${!!process.env.STRIPE_SECRET_KEY}`);
+  console.log(`- Webhook secret set: ${!!process.env.STRIPE_WEBHOOK_SECRET}`);
+  console.log(`- Webhook secret starts with: ${process.env.STRIPE_WEBHOOK_SECRET?.substring(0, 6) || 'NOT_SET'}`);
 });
