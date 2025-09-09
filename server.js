@@ -34,8 +34,6 @@ app.use((req, res, next) => {
   next();
 });
 
-
-
 // --- Health endpoint ---
 app.get("/", (req, res) => {
   res.json({ ok: true, message: "Server alive", timestamp: new Date() });
@@ -53,7 +51,10 @@ app.get("/api/debug", (req, res) => {
   });
 });
 
-// --- Stripe Webhook endpoint ---
+// --- In-memory store for processed events (idempotency) ---
+const processedEvents = new Set();
+
+// --- Stripe Webhook endpoint with idempotency ---
 app.post(
   "/api/webhook",
   express.raw({ type: "application/json" }),
@@ -62,7 +63,7 @@ app.post(
     let event;
 
     try {
-      // Use live key for webhook verification by default
+      // Verify webhook signature
       const stripe = getStripeInstance(stripeKeys.live || stripeKeys.test);
       event = stripe.webhooks.constructEvent(req.body, sig, webhookSecret);
       console.log(`✅ Verified event: ${event.id} (${event.type})`);
@@ -70,6 +71,15 @@ app.post(
       console.error("❌ Webhook signature failed:", err.message);
       return res.status(400).send(`Webhook Error: ${err.message}`);
     }
+
+    // --- Idempotency check ---
+    if (processedEvents.has(event.id)) {
+      console.log(`ℹ️ Event ${event.id} already processed, skipping`);
+      return res.json({ received: true, skipped: true });
+    }
+
+    // Mark event as processed
+    processedEvents.add(event.id);
 
     try {
       if (event.type === "checkout.session.completed") {
