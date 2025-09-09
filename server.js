@@ -204,10 +204,21 @@ async function storeSubscription(record) {
 }
 
 // Start server
-app.listen(PORT, () => {
+app.listen(PORT, '0.0.0.0', () => {
   console.log(`🚀 Server listening on port ${PORT}`);
   console.log(`Environment check:`);
   console.log(`- Stripe key set: ${!!process.env.STRIPE_SECRET_KEY}`);
   console.log(`- Webhook secret set: ${!!process.env.STRIPE_WEBHOOK_SECRET}`);
   console.log(`- Webhook secret starts with: ${process.env.STRIPE_WEBHOOK_SECRET?.substring(0, 6) || 'NOT_SET'}`);
+});
+
+// Graceful shutdown
+process.on('SIGTERM', () => {
+  console.log('Received SIGTERM, shutting down gracefully');
+  process.exit(0);
+});
+
+process.on('SIGINT', () => {
+  console.log('Received SIGINT, shutting down gracefully');
+  process.exit(0);
 });
