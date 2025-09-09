@@ -1,7 +1,6 @@
 // server.js
 import express from "express";
 import Stripe from "stripe";
-import fetch from "node-fetch"; // ensure installed: npm install node-fetch
 
 const app = express();
 const port = process.env.PORT || 8080;
