@@ -34,13 +34,7 @@ app.use((req, res, next) => {
   next();
 });
 
-// --- Heartbeat for idle periods (every second) ---
-setInterval(() => {
-  const idleTime = Date.now() - lastRequestTime;
-  if (idleTime >= 60000) { // 60 seconds idle
-    console.log("💓 Heartbeat - server idle, keeping alive");
-  }
-}, 1000);
+
 
 // --- Health endpoint ---
 app.get("/", (req, res) => {
@@ -61,7 +55,7 @@ app.get("/api/debug", (req, res) => {
 
 // --- Stripe Webhook endpoint ---
 app.post(
-  "/webhook",
+  "/api/webhook",
   express.raw({ type: "application/json" }),
   async (req, res) => {
     const sig = req.headers["stripe-signature"];
