@@ -6,7 +6,7 @@ const app = express();
 const port = process.env.PORT || 8080;
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY, {
-  apiVersion: "2023-10-16", // Use a stable API version to avoid issues with "2025-06-30.basil"
+  apiVersion: "2023-10-16", // Use a stable API version
 });
 
 // Airtable setup
@@ -43,7 +43,7 @@ app.post(
       bodyLength: req.body?.length,
       bodyPreview: req.body ? req.body.toString().slice(0, 100) : "Empty",
       webhookSecret: process.env.STRIPE_WEBHOOK_SECRET ? "Set (hidden)" : "Missing",
-      headers: req.headers, // Log all headers for inspection
+      headers: req.headers,
     });
 
     try {
