@@ -1,7 +1,6 @@
 // server.js
 import express from "express";
 import Stripe from "stripe";
-import "dotenv/config"; // load .env locally
 import fetch from "node-fetch"; // ensure installed: npm install node-fetch
 
 const app = express();
@@ -22,8 +21,69 @@ app.get("/api/debug", (req, res) => {
     webhook_secret_prefix: process.env.STRIPE_WEBHOOK_SECRET?.slice(0, 6) || "NOT_SET",
     airtable_base_set: !!process.env.AIRTABLE_BASE_ID,
     airtable_key_set: !!process.env.AIRTABLE_API_KEY,
-    version: "2.1",
+    airtable_base_id: process.env.AIRTABLE_BASE_ID?.slice(0, 10) + "..." || "NOT_SET",
+    airtable_key_prefix: process.env.AIRTABLE_API_KEY?.slice(0, 10) + "..." || "NOT_SET",
+    version: "2.3",
   });
+});
+
+// Test Airtable connection endpoint
+app.get("/api/test-airtable", async (req, res) => {
+  try {
+    const baseId = process.env.AIRTABLE_BASE_ID;
+    const apiKey = process.env.AIRTABLE_API_KEY;
+    
+    if (!baseId || !apiKey) {
+      return res.status(500).json({ error: "Missing Airtable credentials" });
+    }
+
+    const tableName = "Stripes Signups";
+    const url = `https://api.airtable.com/v0/${baseId}/${encodeURIComponent(tableName)}?maxRecords=1`;
+    
+    console.log("🧪 Testing Airtable connection...");
+    console.log("URL:", url);
+    console.log("Base ID:", baseId);
+    console.log("API Key prefix:", apiKey.slice(0, 10) + "...");
+
+    const response = await fetch(url, {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+      },
+    });
+
+    console.log("Response status:", response.status);
+    console.log("Response headers:", Object.fromEntries(response.headers.entries()));
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      console.error("Airtable error:", errorText);
+      return res.status(response.status).json({
+        error: "Airtable API error",
+        status: response.status,
+        statusText: response.statusText,
+        response: errorText
+      });
+    }
+
+    const data = await response.json();
+    console.log("✅ Airtable connection successful");
+    
+    res.json({
+      success: true,
+      message: "Airtable connection working",
+      recordCount: data.records?.length || 0,
+      fields: data.records?.[0]?.fields ? Object.keys(data.records[0].fields) : []
+    });
+
+  } catch (error) {
+    console.error("Test error:", error);
+    res.status(500).json({
+      error: "Test failed",
+      message: error.message
+    });
+  }
 });
 
 // Webhook endpoint — use raw body for signature verification
@@ -31,7 +91,7 @@ app.post(
   "/webhook",
   express.raw({ type: "application/json" }),
   async (req, res) => {
-    console.log("🎯 NEW VERSION 2.1 - Webhook endpoint hit");
+    console.log("🎯 NEW VERSION 2.3 - Webhook endpoint hit");
 
     let totalLength = 0;
     req.on('data', chunk => {
@@ -120,33 +180,98 @@ async function storeSubscription(session, customer = null, subscription = null) 
     throw new Error("Missing Airtable credentials");
   }
 
-  const tableName = "Stripes Signups"; // Updated to correct table name
-  const url = `https://api.airtable.com/v0/${baseId}/${encodeURIComponent(tableName)}`;
+  // Create a new table name with timestamp to avoid conflicts
+  const timestamp = new Date().toISOString().slice(0, 19).replace(/:/g, '-');
+  const tableName = `Stripe_Webhooks_${timestamp}`;
+  
+  console.log("📋 Creating new table:", tableName);
 
-  // Map session data to your Airtable fields
+  // First, create the table with proper field definitions
+  const createTableUrl = `https://api.airtable.com/v0/meta/bases/${baseId}/tables`;
+  
+  const tableSchema = {
+    name: tableName,
+    description: "Stripe webhook data from checkout sessions",
+    fields: [
+      { name: "Session ID", type: "singleLineText" },
+      { name: "Customer Email", type: "email" },
+      { name: "Customer Name", type: "singleLineText" },
+      { name: "Stripe Customer ID", type: "singleLineText" },
+      { name: "Stripe Subscription ID", type: "singleLineText" },
+      { name: "Amount Total", type: "currency", options: { precision: 2 } },
+      { name: "Currency", type: "singleLineText" },
+      { name: "Payment Status", type: "singleSelect", options: { 
+        choices: [
+          { name: "paid" },
+          { name: "unpaid" },
+          { name: "no_payment_required" }
+        ]
+      }},
+      { name: "Plan Name", type: "singleLineText" },
+      { name: "Subscription Status", type: "singleLineText" },
+      { name: "Created At", type: "dateTime" },
+      { name: "Metadata", type: "longText" }
+    ]
+  };
+
+  console.log("🏗️ Creating table with schema...");
+  
+  const createRes = await fetch(createTableUrl, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(tableSchema),
+  });
+
+  if (!createRes.ok) {
+    const errorText = await createRes.text();
+    console.error(`❌ Table creation error:`, {
+      status: createRes.status,
+      statusText: createRes.statusText,
+      response: errorText
+    });
+    throw new Error(`Failed to create table: ${createRes.status} ${errorText}`);
+  }
+
+  const tableData = await createRes.json();
+  console.log("✅ Table created successfully:", tableData.name);
+
+  // Wait a moment for table to be ready
+  await new Promise(resolve => setTimeout(resolve, 1000));
+
+  // Now insert the record into the new table
+  const recordsUrl = `https://api.airtable.com/v0/${baseId}/${encodeURIComponent(tableName)}`;
+
   const record = {
     fields: {
-      "Email": session.customer_details?.email || session.customer_email,
-      "Full Name": session.customer_details?.name || customer?.name || "",
+      "Session ID": session.id || "",
+      "Customer Email": session.customer_details?.email || session.customer_email || "",
+      "Customer Name": session.customer_details?.name || customer?.name || "",
       "Stripe Customer ID": session.customer || "",
       "Stripe Subscription ID": session.subscription || "",
-      "Plan": subscription?.items?.data[0]?.price?.nickname || subscription?.items?.data[0]?.price?.id || "",
-      "Status": session.payment_status || "paid",
-      // Optional fields - you can populate these from session metadata if available
-      "Phenom_Partner": session.metadata?.phenom_partner || "",
-      "UTM_Source": session.metadata?.utm_source || "",
-      "UTM_Medium": session.metadata?.utm_medium || "",
-      "UTM_Campaign": session.metadata?.utm_campaign || "",
-      "Promo Code": session.discount?.coupon?.id || "",
-      // Next Invoice Date will be calculated by Stripe for subscriptions
-      "Next Invoice Date": subscription?.current_period_end ? 
-        new Date(subscription.current_period_end * 1000).toISOString().split('T')[0] : ""
+      "Amount Total": session.amount_total ? session.amount_total / 100 : 0,
+      "Currency": session.currency?.toUpperCase() || "",
+      "Payment Status": session.payment_status || "",
+      "Plan Name": subscription?.items?.data[0]?.price?.nickname || 
+                   subscription?.items?.data[0]?.price?.id || "",
+      "Subscription Status": subscription?.status || "",
+      "Created At": new Date().toISOString(),
+      "Metadata": JSON.stringify({
+        session_metadata: session.metadata || {},
+        subscription_metadata: subscription?.metadata || {},
+        utm_source: session.metadata?.utm_source,
+        utm_medium: session.metadata?.utm_medium,
+        utm_campaign: session.metadata?.utm_campaign,
+        promo_code: session.discount?.coupon?.id
+      }, null, 2)
     },
   };
 
-  console.log("📤 Sending record to Airtable:", JSON.stringify(record, null, 2));
+  console.log("📤 Sending record to new table:", JSON.stringify(record, null, 2));
 
-  const res = await fetch(url, {
+  const res = await fetch(recordsUrl, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${apiKey}`,
@@ -157,20 +282,18 @@ async function storeSubscription(session, customer = null, subscription = null) 
 
   if (!res.ok) {
     const errorText = await res.text();
-    console.error(`❌ Airtable error details:`, {
+    console.error(`❌ Record insertion error:`, {
       status: res.status,
       statusText: res.statusText,
       response: errorText,
-      url,
-      baseId,
-      tableName,
-      apiKeyPrefix: apiKey?.slice(0, 8) + '...'
+      tableName
     });
-    throw new Error(`Airtable API error: ${res.status} ${errorText}`);
+    throw new Error(`Failed to insert record: ${res.status} ${errorText}`);
   }
 
   const data = await res.json();
-  console.log("✅ Airtable record created:", JSON.stringify(data, null, 2));
+  console.log("✅ Record created in new table:", JSON.stringify(data, null, 2));
+  console.log(`🎉 Data stored in table: ${tableName}`);
   return data;
 }
 
@@ -187,5 +310,5 @@ app.listen(port, "0.0.0.0", () => {
     "- Webhook secret starts with:",
     process.env.STRIPE_WEBHOOK_SECRET?.slice(0, 6) || "NOT_SET"
   );
-  console.log("✅ Version 2.1 ready");
+  console.log("✅ Version 2.3 ready");
 });
