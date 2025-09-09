@@ -1,95 +1,24 @@
+// server.js
 import express from "express";
 import Stripe from "stripe";
-
-const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
+import "dotenv/config"; // load .env locally
 
 const app = express();
-const PORT = process.env.PORT || 8080;
+const port = process.env.PORT || 8080;
 
-// --- In-memory storage (replace with DB in production) ---
-const processedEvents = new Set();
-const stripeEvents = [];
-
-// --- Webhook handler with raw body parsing ---
-app.use("/api/webhook", (req, res, next) => {
-  if (req.method !== "POST") return next();
-
-  let data = "";
-  req.setEncoding("utf8");
-
-  req.on("data", (chunk) => {
-    data += chunk;
-  });
-
-  req.on("end", async () => {
-    const sig = req.headers["stripe-signature"];
-
-    if (!sig) {
-      console.error("❌ Missing Stripe signature header");
-      return res.status(400).send("Missing Stripe signature header");
-    }
-
-    let event;
-    try {
-      const bodyBuffer = Buffer.from(data, "utf8");
-      event = stripe.webhooks.constructEvent(
-        bodyBuffer,
-        sig,
-        process.env.STRIPE_WEBHOOK_SECRET
-      );
-      console.log(`✅ Verified webhook event: ${event.id} (${event.type})`);
-    } catch (err) {
-      console.error("❌ Webhook signature verification failed:", err.message);
-      return res.status(400).send(`Webhook Error: ${err.message}`);
-    }
-
-    try {
-      if (processedEvents.has(event.id)) {
-        console.log(`🔄 Skipping duplicate event: ${event.id}`);
-        return res.json({ received: true, processed: false });
-      }
-
-      // Store the event
-      const record = {
-        id: event.id,
-        type: event.type,
-        created: event.created,
-        raw: event,
-        processed_at: new Date().toISOString(),
-      };
-      stripeEvents.push(record);
-      processedEvents.add(event.id);
-
-      if (event.type === "checkout.session.completed") {
-        await processCheckoutCompleted(event.data.object);
-      }
-
-      res.json({ received: true, processed: true });
-    } catch (err) {
-      console.error("❌ Error handling webhook:", err);
-      processedEvents.delete(event.id);
-      res.status(500).json({ error: "Failed to process event" });
-    }
-  });
-
-  req.on("error", (err) => {
-    console.error("❌ Request stream error:", err);
-    res.status(400).send("Invalid request stream");
-  });
+// Stripe setup
+const stripe = new Stripe(process.env.STRIPE_SECRET_KEY, {
+  apiVersion: "2023-10-16",
 });
 
-// --- JSON middleware for other routes ---
-app.use(express.json());
+const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
 
-// --- Healthcheck ---
+// Root health endpoint (Railway pings)
 app.get("/", (req, res) => {
-  res.status(200).json({
-    status: "✅ Alive",
-    timestamp: new Date().toISOString(),
-  });
+  res.json({ ok: true, message: "Server alive", timestamp: new Date() });
 });
 
-// --- Debug info (remove in production) ---
+// Debug endpoint
 app.get("/api/debug", (req, res) => {
   res.json({
     stripe_key_set: !!process.env.STRIPE_SECRET_KEY,
@@ -99,95 +28,126 @@ app.get("/api/debug", (req, res) => {
   });
 });
 
-// --- Webhook status ---
-app.get("/api/webhook", (req, res) => {
-  res.json({
-    status: "healthy",
-    processed: processedEvents.size,
-    logged: stripeEvents.length,
-    recent: stripeEvents.slice(-5).map((e) => ({
-      id: e.id,
-      type: e.type,
-      processed_at: e.processed_at,
-    })),
-  });
-});
+// Stripe webhook (raw body)
+app.post(
+  "/webhook",
+  express.raw({ type: "application/json" }),
+  async (req, res) => {
+    const sig = req.headers["stripe-signature"];
+    let event;
 
-// --- Helpers ---
-async function processCheckoutCompleted(session) {
-  console.log("📝 Processing checkout:", session.id);
-
-  const subscriptionRecord = {
-    customer_id: session.customer,
-    subscription_id: session.subscription,
-    session_id: session.id,
-    created_at: new Date().toISOString(),
-    amount_total: session.amount_total,
-    currency: session.currency,
-  };
-
-  await storeSubscription(subscriptionRecord);
-  console.log("✅ Stored subscription:", subscriptionRecord.subscription_id);
-}
-
-async function storeSubscription(record) {
-  const payload = {
-    records: [
-      {
-        fields: {
-          "Customer ID": record.customer_id,
-          "Subscription ID": record.subscription_id,
-          "Session ID": record.session_id,
-          Amount: record.amount_total,
-          Currency: record.currency,
-          Created: record.created_at,
-        },
-      },
-    ],
-  };
-
-  const response = await fetch(
-    `https://api.airtable.com/v0/${process.env.AIRTABLE_BASE_ID}/Subscriptions`,
-    {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${process.env.AIRTABLE_API_KEY}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(payload),
+    try {
+      event = stripe.webhooks.constructEvent(req.body, sig, webhookSecret);
+      console.log(`✅ Verified event: ${event.id} (${event.type})`);
+    } catch (err) {
+      console.error("❌ Webhook signature failed:", err.message);
+      return res.status(400).send(`Webhook Error: ${err.message}`);
     }
-  );
 
-  if (!response.ok) {
-    throw new Error(`Airtable API error: ${response.statusText}`);
+    try {
+      if (event.type === "checkout.session.completed") {
+        await processCheckoutCompleted(event);
+      } else {
+        console.log(`ℹ️ Unhandled event type: ${event.type}`);
+      }
+    } catch (err) {
+      console.error("❌ Event processing failed:", err);
+      return res.status(500).send("Internal Server Error");
+    }
+
+    res.json({ received: true });
+  }
+);
+
+// --- Handlers ---
+async function processCheckoutCompleted(event) {
+  const session = event.data.object;
+  console.log("💳 Processing checkout session:", session.id);
+
+  let customer = null;
+  let subscription = null;
+
+  try {
+    if (session.customer) {
+      customer = await stripe.customers.retrieve(session.customer);
+    }
+    if (session.subscription) {
+      subscription = await stripe.subscriptions.retrieve(session.subscription);
+    }
+
+    await storeSubscription(session, customer, subscription);
+    console.log("✅ Session stored in Airtable");
+  } catch (err) {
+    console.error("❌ Failed to store session:", err);
   }
 }
 
-// --- Start server ---
-const server = app.listen(PORT, "0.0.0.0", () => {
-  console.log(`🚀 Server running at http://0.0.0.0:${PORT}`);
-  console.log("📋 Env check:");
-  console.log("- Stripe key set:", !!process.env.STRIPE_SECRET_KEY);
-  console.log("- Webhook secret set:", !!process.env.STRIPE_WEBHOOK_SECRET);
-  console.log("- Airtable base set:", !!process.env.AIRTABLE_BASE_ID);
-  console.log("- Airtable key set:", !!process.env.AIRTABLE_API_KEY);
-  console.log("✅ Ready");
-});
+// --- Airtable integration ---
+async function storeSubscription(session, customer = null, subscription = null) {
+  const { AIRTABLE_BASE_ID, AIRTABLE_API_KEY } = process.env;
+  if (!AIRTABLE_BASE_ID || !AIRTABLE_API_KEY) {
+    throw new Error("Missing Airtable credentials");
+  }
 
-// --- Graceful shutdown ---
-const shutdown = (signal) => {
-  console.log(`🛑 Received ${signal}, shutting down gracefully...`);
-  server.close(() => {
-    console.log("✅ Server closed");
-    process.exit(0);
+  const tableName = "Stripe Signups"; // Existing table
+  const url = `https://api.airtable.com/v0/${AIRTABLE_BASE_ID}/${encodeURIComponent(
+    tableName
+  )}`;
+
+  // Only include fields that exist in your table
+  const recordFields = {
+    "Session ID": session.id,
+    "Customer Email": session.customer_details?.email || session.customer_email || "",
+    "Customer Name": session.customer_details?.name || customer?.name || "",
+    "Stripe Customer ID": session.customer || "",
+    "Stripe Subscription ID": session.subscription || "",
+    "Amount Total": session.amount_total ? session.amount_total / 100 : 0,
+    "Currency": session.currency?.toUpperCase() || "",
+    "Payment Status": session.payment_status || "",
+    "Plan Name":
+      subscription?.items?.data?.[0]?.price?.nickname ||
+      subscription?.items?.data?.[0]?.price?.id ||
+      "",
+    "Subscription Status": subscription?.status || "",
+    "Created At": new Date().toISOString(),
+    "Promo Code": session.total_details?.breakdown?.discounts?.[0]?.discount?.coupon?.id || "",
+    "UTM Source": session.metadata?.utm_source || "",
+    "UTM Medium": session.metadata?.utm_medium || "",
+    "UTM Campaign": session.metadata?.utm_campaign || "",
+    "Source Channel": session.metadata?.source_channel || "",
+  };
+
+  const res = await fetch(url, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${AIRTABLE_API_KEY}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ records: [{ fields: recordFields }] }),
   });
 
-  // Fallback: force exit after 10s
-  setTimeout(() => {
-    console.log("⚠️ Force exiting...");
-    process.exit(1);
-  }, 10000);
-};
+  if (!res.ok) {
+    const errorText = await res.text();
+    throw new Error(`Airtable insert failed: ${errorText}`);
+  }
 
-process.on("SIGTERM", () => shutdown("SIGTERM"));
-process.on("SIGINT", () => shutdown("SIGINT"));
+  const data = await res.json();
+  console.log("✅ Airtable response:", data);
+  return data;
+}
+
+// Start server
+app.listen(port, "0.0.0.0", () => {
+  console.log(`🚀 Server listening on 0.0.0.0:${port}`);
+  console.log("✅ Ready to receive webhooks");
+});
+
+// Graceful shutdown
+process.on("SIGTERM", () => {
+  console.log("🛑 SIGTERM received, shutting down...");
+  process.exit(0);
+});
+process.on("SIGINT", () => {
+  console.log("🛑 SIGINT received, shutting down...");
+  process.exit(0);
+});
