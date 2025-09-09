@@ -203,22 +203,46 @@ async function storeSubscription(record) {
   console.log('🎯 Stored subscription in Airtable:', record.subscription_id);
 }
 
-// Start server
-app.listen(PORT, '0.0.0.0', () => {
-  console.log(`🚀 Server listening on port ${PORT}`);
+// Start server with explicit host binding for Railway
+const server = app.listen(PORT, '0.0.0.0', () => {
+  console.log(`🚀 Server listening on 0.0.0.0:${PORT}`);
   console.log(`Environment check:`);
   console.log(`- Stripe key set: ${!!process.env.STRIPE_SECRET_KEY}`);
   console.log(`- Webhook secret set: ${!!process.env.STRIPE_WEBHOOK_SECRET}`);
   console.log(`- Webhook secret starts with: ${process.env.STRIPE_WEBHOOK_SECRET?.substring(0, 6) || 'NOT_SET'}`);
+  
+  // Log successful startup to confirm server is ready
+  console.log('✅ Server is ready to receive requests');
 });
 
-// Graceful shutdown
-process.on('SIGTERM', () => {
-  console.log('Received SIGTERM, shutting down gracefully');
-  process.exit(0);
+// Handle server errors
+server.on('error', (err) => {
+  console.error('❌ Server error:', err);
 });
 
-process.on('SIGINT', () => {
-  console.log('Received SIGINT, shutting down gracefully');
-  process.exit(0);
+// Graceful shutdown handlers
+const gracefulShutdown = () => {
+  console.log('📝 Received shutdown signal, closing server...');
+  server.close(() => {
+    console.log('✅ Server closed');
+    process.exit(0);
+  });
+  
+  // Force exit after 10 seconds
+  setTimeout(() => {
+    console.log('⚠️  Forcing exit...');
+    process.exit(1);
+  }, 10000);
+};
+
+process.on('SIGTERM', gracefulShutdown);
+process.on('SIGINT', gracefulShutdown);
+
+// Keep process alive
+process.on('uncaughtException', (err) => {
+  console.error('❌ Uncaught Exception:', err);
+});
+
+process.on('unhandledRejection', (err) => {
+  console.error('❌ Unhandled Rejection:', err);
 });
