@@ -46,7 +46,7 @@ app.get("/api/debug", (req, res) => {
 
 // --- Stripe Webhook endpoint ---
 app.post(
-  "/webhook",
+  "/api/webhook",
   express.raw({ type: "application/json" }),
   async (req, res) => {
     const sig = req.headers["stripe-signature"];
@@ -144,7 +144,7 @@ async function sendToZapier(session, customer = null, subscription = null) {
 // --- Heartbeat every 1 second ---
 setInterval(() => {
   console.log("💓 Heartbeat - server alive");
-}, 1000);
+}, 10);
 
 // --- Start server ---
 app.listen(port, "0.0.0.0", () => {
