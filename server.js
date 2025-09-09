@@ -6,89 +6,61 @@ const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// In-memory storage for demo (replace with DB for production)
+// In-memory storage for demo (replace with DB in production)
 const processedEvents = new Set();
 const stripeEvents = [];
 
-// CRITICAL: Handle webhook route BEFORE any other middleware
-// This ensures the raw body is preserved for Stripe signature verification
+// --- Stripe Webhook Route ---
+// Must come BEFORE express.json()
 app.post('/api/webhook', express.raw({ type: 'application/json' }), async (req, res) => {
   const sig = req.headers['stripe-signature'];
   let event;
-
-  // Debug logging
-  console.log('🔍 Webhook received:');
-  console.log('- Body type:', typeof req.body);
-  console.log('- Body is Buffer:', Buffer.isBuffer(req.body));
-  console.log('- Body length:', req.body?.length);
-  console.log('- Body constructor:', req.body?.constructor?.name);
-  console.log('- Signature present:', !!sig);
-  console.log('- Signature value:', sig ? sig.substring(0, 20) + '...' : 'MISSING');
-  console.log('- Webhook secret set:', !!process.env.STRIPE_WEBHOOK_SECRET);
 
   if (!sig) {
     console.error('❌ No Stripe signature header found');
     return res.status(400).send('No Stripe signature header found');
   }
 
-  if (!req.body || req.body.length === 0) {
-    console.error('❌ Empty request body');
-    return res.status(400).send('Empty request body');
-  }
-
-  // Ensure we're working with a Buffer
-  let bodyBuffer = req.body;
-  if (!Buffer.isBuffer(req.body)) {
-    console.log('🔧 Converting body to Buffer...');
-    if (typeof req.body === 'string') {
-      bodyBuffer = Buffer.from(req.body, 'utf8');
-    } else {
-      bodyBuffer = Buffer.from(JSON.stringify(req.body), 'utf8');
-    }
-    console.log('- Converted body is Buffer:', Buffer.isBuffer(bodyBuffer));
-    console.log('- Converted body length:', bodyBuffer.length);
-  }
-
   try {
+    // ✅ Use raw body directly
     event = stripe.webhooks.constructEvent(
-      bodyBuffer,
+      req.body,
       sig,
       process.env.STRIPE_WEBHOOK_SECRET
     );
-    console.log('✅ Webhook signature verified for event:', event.id);
   } catch (err) {
     console.error('❌ Signature verification failed:', err.message);
-    console.error('❌ Body preview (first 100 chars):', bodyBuffer.toString().substring(0, 100));
+    console.error('❌ Body preview (first 100 chars):', req.body.toString().substring(0, 100));
     return res.status(400).send(`Webhook Error: ${err.message}`);
   }
 
   // Idempotency check
   if (processedEvents.has(event.id)) {
-    console.log(`🔄 Event ${event.id} already processed - SKIPPING`);
+    console.log(`🔄 Event ${event.id} already processed - skipping`);
     return res.json({ received: true, processed: false, reason: 'duplicate', event_id: event.id });
   }
 
   try {
+    // Store raw event record
     const rawEventRecord = {
       event_id: event.id,
       type: event.type,
       created: event.created,
       raw_payload: event,
       processed_at: new Date().toISOString(),
-      retry_detected: false
     };
 
     stripeEvents.push(rawEventRecord);
     processedEvents.add(event.id);
-    console.log('📝 Raw event logged:', event.id, event.type);
 
+    console.log(`✅ Event received: ${event.id} (${event.type})`);
+
+    // Handle event types
     if (event.type === 'checkout.session.completed') {
       await processCheckoutCompleted(event.data.object);
     }
 
-    console.log(`✅ Successfully processed event: ${event.id}`);
     res.json({ received: true, processed: true, event_id: event.id, event_type: event.type });
-
   } catch (error) {
     console.error('❌ Error processing webhook:', error);
     processedEvents.delete(event.id);
@@ -96,10 +68,10 @@ app.post('/api/webhook', express.raw({ type: 'application/json' }), async (req, 
   }
 });
 
-// Apply JSON middleware for all other routes AFTER the webhook route
+// --- Middleware for other routes ---
 app.use(express.json());
 
-// Root route for health checks
+// --- Health + Debug Routes ---
 app.get('/', (req, res) => {
   res.json({ 
     status: 'Stripe webhook server running',
@@ -107,7 +79,6 @@ app.get('/', (req, res) => {
   });
 });
 
-// Health check
 app.get('/api/webhook', (req, res) => {
   res.json({
     status: 'healthy',
@@ -121,7 +92,6 @@ app.get('/api/webhook', (req, res) => {
   });
 });
 
-// Debug route to check environment variables (remove in production)
 app.get('/api/debug', (req, res) => {
   res.json({
     stripe_key_set: !!process.env.STRIPE_SECRET_KEY,
@@ -132,10 +102,9 @@ app.get('/api/debug', (req, res) => {
   });
 });
 
-// --- Helper functions ---
-
+// --- Helper Functions ---
 async function processCheckoutCompleted(session) {
-  console.log('Processing checkout for session:', session.id);
+  console.log(`Processing checkout.session.completed: ${session.id}`);
 
   const subscriptionRecord = {
     customer_id: session.customer,
@@ -154,7 +123,7 @@ async function processCheckoutCompleted(session) {
     currency: session.currency
   };
 
-  // PHENOM100 coupon detection
+  // Detect PHENOM100 coupon
   if (session.total_details?.breakdown?.discounts) {
     for (const discount of session.total_details.breakdown.discounts) {
       if (discount.discount?.coupon?.id === 'PHENOM100') {
@@ -166,7 +135,7 @@ async function processCheckoutCompleted(session) {
     }
   }
 
-  // Infer source_channel from client_reference_id if metadata missing
+  // Infer source_channel from client_reference_id if missing
   if (!subscriptionRecord.source_channel && session.client_reference_id) {
     const ref = session.client_reference_id.toLowerCase();
     if (ref.includes('social')) subscriptionRecord.source_channel = 'social';
@@ -176,7 +145,7 @@ async function processCheckoutCompleted(session) {
   }
 
   await storeSubscription(subscriptionRecord);
-  console.log('✅ Subscription record processed:', subscriptionRecord);
+  console.log('✅ Subscription record processed:', subscriptionRecord.session_id);
 }
 
 async function storeSubscription(record) {
@@ -200,15 +169,17 @@ async function storeSubscription(record) {
     }]
   };
 
-  // Using built-in fetch (available in Node.js 18+)
-  const response = await fetch(`https://api.airtable.com/v0/${process.env.AIRTABLE_BASE_ID}/Subscriptions`, {
-    method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${process.env.AIRTABLE_API_KEY}`,
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify(airtablePayload)
-  });
+  const response = await fetch(
+    `https://api.airtable.com/v0/${process.env.AIRTABLE_BASE_ID}/Subscriptions`,
+    {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${process.env.AIRTABLE_API_KEY}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(airtablePayload)
+    }
+  );
 
   if (!response.ok) {
     throw new Error(`Airtable API error: ${response.statusText}`);
@@ -217,32 +188,22 @@ async function storeSubscription(record) {
   console.log('🎯 Stored subscription in Airtable:', record.subscription_id);
 }
 
-// Start server with explicit host binding for Railway
+// --- Server Startup ---
 const server = app.listen(PORT, '0.0.0.0', () => {
   console.log(`🚀 Server listening on 0.0.0.0:${PORT}`);
-  console.log(`Environment check:`);
   console.log(`- Stripe key set: ${!!process.env.STRIPE_SECRET_KEY}`);
   console.log(`- Webhook secret set: ${!!process.env.STRIPE_WEBHOOK_SECRET}`);
-  console.log(`- Webhook secret starts with: ${process.env.STRIPE_WEBHOOK_SECRET?.substring(0, 6) || 'NOT_SET'}`);
-  
-  // Log successful startup to confirm server is ready
   console.log('✅ Server is ready to receive requests');
 });
 
-// Handle server errors
-server.on('error', (err) => {
-  console.error('❌ Server error:', err);
-});
-
-// Graceful shutdown handlers
+// --- Graceful Shutdown ---
 const gracefulShutdown = () => {
   console.log('📝 Received shutdown signal, closing server...');
   server.close(() => {
     console.log('✅ Server closed');
     process.exit(0);
   });
-  
-  // Force exit after 10 seconds
+
   setTimeout(() => {
     console.log('⚠️  Forcing exit...');
     process.exit(1);
@@ -252,7 +213,6 @@ const gracefulShutdown = () => {
 process.on('SIGTERM', gracefulShutdown);
 process.on('SIGINT', gracefulShutdown);
 
-// Keep process alive
 process.on('uncaughtException', (err) => {
   console.error('❌ Uncaught Exception:', err);
 });
