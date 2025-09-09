@@ -8,19 +8,19 @@ const port = process.env.PORT || 8080;
 
 // --- Stripe keys ---
 const stripeKeys = {
-  live: process.env.STRIPE_SECRET_KEY_LIVE,       // live key
-  test: process.env.STRIPE_SECRET_KEY_TEST        // test key
+  live: process.env.STRIPE_SECRET_KEY_LIVE, // live key
+  test: process.env.STRIPE_SECRET_KEY_TEST  // test key
 };
 
 const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
-const zapierWebhookURL = process.env.ZAPIER_WEBHOOK_URL; // Zapier Webhook
+const zapierWebhookURL = process.env.ZAPIER_WEBHOOK_URL; // Zapier webhook
 
-// --- Helper: Create Stripe instance ---
+// --- Helper: create Stripe instance ---
 function getStripeInstance(key) {
   return new Stripe(key, { apiVersion: "2023-10-16" });
 }
 
-// --- Select Stripe key based on livemode ---
+// --- Select Stripe key based on event.livemode ---
 function stripeForEvent(event) {
   const key = event.livemode ? stripeKeys.live : stripeKeys.test;
   if (!key) throw new Error(`Missing Stripe key for ${event.livemode ? "live" : "test"} mode`);
@@ -46,7 +46,7 @@ app.get("/api/debug", (req, res) => {
 
 // --- Stripe Webhook endpoint ---
 app.post(
-  "/api/webhook",
+  "/webhook",
   express.raw({ type: "application/json" }),
   async (req, res) => {
     const sig = req.headers["stripe-signature"];
@@ -91,7 +91,6 @@ async function processCheckoutCompleted(event) {
     if (session.customer) {
       customer = await stripe.customers.retrieve(session.customer);
     }
-
     if (session.subscription) {
       subscription = await stripe.subscriptions.retrieve(session.subscription);
     }
@@ -141,6 +140,11 @@ async function sendToZapier(session, customer = null, subscription = null) {
     throw new Error(`Zapier webhook failed: ${text}`);
   }
 }
+
+// --- Heartbeat every 1 second ---
+setInterval(() => {
+  console.log("💓 Heartbeat - server alive");
+}, 1000);
 
 // --- Start server ---
 app.listen(port, "0.0.0.0", () => {
