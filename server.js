@@ -1,31 +1,40 @@
 import express from "express";
 import Stripe from "stripe";
 import Airtable from "airtable";
+import pino from "pino";
+import retry from "p-retry";
 
+const logger = pino();
 const app = express();
 const port = process.env.PORT || 8080;
-const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
-// Airtable setup
+const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 const base = new Airtable({ apiKey: process.env.AIRTABLE_API_KEY }).base(
   process.env.AIRTABLE_BASE_ID
 );
 const table = base(process.env.AIRTABLE_TABLE_NAME);
 
-// 🛑 DO NOT use express.json() globally yet
+// Validate environment variables
+const requiredEnvVars = [
+  "STRIPE_SECRET_KEY",
+  "STRIPE_WEBHOOK_SECRET",
+  "AIRTABLE_API_KEY",
+  "AIRTABLE_BASE_ID",
+  "AIRTABLE_TABLE_NAME",
+];
+requiredEnvVars.forEach((envVar) => {
+  if (!process.env[envVar]) {
+    logger.error(`Missing environment variable: ${envVar}`);
+    process.exit(1);
+  }
+});
 
-// ✅ Webhook route — raw body only
+// Webhook endpoint
 app.post(
   "/webhook",
-  express.raw({ type: "*/*" }),
+  express.raw({ type: "application/json" }),
   async (req, res) => {
     const sig = req.headers["stripe-signature"];
-
-    console.log("🔍 Webhook raw check:", {
-      isBuffer: Buffer.isBuffer(req.body),
-      length: req.body?.length,
-      type: typeof req.body,
-    });
 
     try {
       const event = stripe.webhooks.constructEvent(
@@ -33,46 +42,65 @@ app.post(
         sig,
         process.env.STRIPE_WEBHOOK_SECRET
       );
+      logger.info({ eventId: event.id, eventType: event.type }, "Webhook received");
 
-      console.log("✅ Verified event:", event.id, event.type);
+      switch (event.type) {
+        case "checkout.session.completed":
+          const session = event.data.object;
+          // Check for duplicate session
+          const existingRecords = await table
+            .select({ filterByFormula: `{SessionId} = "${session.id}"` })
+            .firstPage();
+          if (existingRecords.length > 0) {
+            logger.warn({ sessionId: session.id }, "Duplicate session, skipping");
+            return res.json({ received: true });
+          }
 
-      if (event.type === "checkout.session.completed") {
-        const session = event.data.object;
+          // Create Airtable record with retry
+          await retry(
+            () =>
+              table.create([
+                {
+                  fields: {
+                    Email: session.customer_details?.email || "unknown",
+                    Amount: session.amount_total / 100,
+                    Status: session.payment_status,
+                    SessionId: session.id,
+                    Created: new Date().toISOString(),
+                  },
+                },
+              ]),
+            { retries: 3 }
+          );
+          logger.info({ sessionId: session.id }, "Airtable record created");
+          break;
 
-        try {
-          const created = await table.create([
-            {
-              fields: {
-                Email: session.customer_details?.email || "unknown",
-                Amount: session.amount_total / 100,
-                Status: session.payment_status,
-                SessionId: session.id,
-                Created: new Date().toISOString(),
-              },
-            },
-          ]);
-          console.log("📦 Airtable record created:", created[0].id);
-        } catch (err) {
-          console.error("❌ Airtable insert failed:", err.message);
-        }
+        default:
+          logger.info({ eventType: event.type }, "Unhandled event type");
       }
 
       res.json({ received: true });
     } catch (err) {
-      console.error("❌ Webhook verification failed:", err.message);
+      logger.error({ error: err.message }, "Webhook verification failed");
       res.status(400).send(`Webhook Error: ${err.message}`);
     }
   }
 );
 
-// ✅ Enable JSON parsing for everything else *after* webhook
+// JSON parsing for other routes
 app.use(express.json());
 
 // Health check
-app.get("/", (req, res) => {
-  res.send("✅ Server running " + new Date().toISOString());
+app.get("/health", async (req, res) => {
+  try {
+    await stripe.balance.retrieve();
+    await table.select({ maxRecords: 1 }).firstPage();
+    res.json({ status: "healthy", timestamp: new Date().toISOString() });
+  } catch (err) {
+    res.status(500).json({ status: "unhealthy", error: err.message });
+  }
 });
 
 app.listen(port, "0.0.0.0", () => {
-  console.log(`🚀 Server listening on port ${port}`);
+  logger.info(`Server listening on port ${port}`);
 });
