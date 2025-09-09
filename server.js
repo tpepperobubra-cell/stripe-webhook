@@ -21,6 +21,7 @@ app.post('/api/webhook', express.raw({ type: 'application/json' }), async (req, 
   console.log('- Body type:', typeof req.body);
   console.log('- Body is Buffer:', Buffer.isBuffer(req.body));
   console.log('- Body length:', req.body?.length);
+  console.log('- Body constructor:', req.body?.constructor?.name);
   console.log('- Signature present:', !!sig);
   console.log('- Signature value:', sig ? sig.substring(0, 20) + '...' : 'MISSING');
   console.log('- Webhook secret set:', !!process.env.STRIPE_WEBHOOK_SECRET);
@@ -35,16 +36,29 @@ app.post('/api/webhook', express.raw({ type: 'application/json' }), async (req, 
     return res.status(400).send('Empty request body');
   }
 
+  // Ensure we're working with a Buffer
+  let bodyBuffer = req.body;
+  if (!Buffer.isBuffer(req.body)) {
+    console.log('🔧 Converting body to Buffer...');
+    if (typeof req.body === 'string') {
+      bodyBuffer = Buffer.from(req.body, 'utf8');
+    } else {
+      bodyBuffer = Buffer.from(JSON.stringify(req.body), 'utf8');
+    }
+    console.log('- Converted body is Buffer:', Buffer.isBuffer(bodyBuffer));
+    console.log('- Converted body length:', bodyBuffer.length);
+  }
+
   try {
     event = stripe.webhooks.constructEvent(
-      req.body,
+      bodyBuffer,
       sig,
       process.env.STRIPE_WEBHOOK_SECRET
     );
     console.log('✅ Webhook signature verified for event:', event.id);
   } catch (err) {
     console.error('❌ Signature verification failed:', err.message);
-    console.error('❌ Body preview:', req.body.toString().substring(0, 100));
+    console.error('❌ Body preview (first 100 chars):', bodyBuffer.toString().substring(0, 100));
     return res.status(400).send(`Webhook Error: ${err.message}`);
   }
 
