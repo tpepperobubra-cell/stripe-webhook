@@ -1,6 +1,6 @@
-// server.js
 import express from "express";
 import Stripe from "stripe";
+import { AbortController } from "node-abort-controller"; // For fetch timeouts
 
 const app = express();
 const port = process.env.PORT || 8080;
@@ -12,12 +12,25 @@ const stripe = new Stripe(process.env.STRIPE_SECRET_KEY, {
 
 const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
 
+// Middleware for parsing webhook raw body
+app.use(
+  "/webhook",
+  express.raw({ type: "application/json" })
+);
+app.use(express.json()); // For other endpoints
+
+// Graceful shutdown handling
+process.on("SIGTERM", () => {
+  console.log("🛑 Received SIGTERM. Performing graceful shutdown...");
+  process.exit(0);
+});
+
 // Root health endpoint
 app.get("/", (req, res) => {
-  res.json({
+  res.status(200).json({
     status: "healthy",
     service: "stripe-webhook-server",
-    version: "2.4",
+    version: "2.5", // Updated version
     timestamp: new Date().toISOString(),
   });
 });
@@ -32,7 +45,7 @@ app.get("/api/debug", (req, res) => {
     airtable_key_set: !!process.env.AIRTABLE_API_KEY,
     airtable_base_id: process.env.AIRTABLE_BASE_ID?.slice(0, 10) + "..." || "NOT_SET",
     airtable_key_prefix: process.env.AIRTABLE_API_KEY?.slice(0, 10) + "..." || "NOT_SET",
-    version: "2.4",
+    version: "2.5",
   });
 });
 
@@ -43,11 +56,14 @@ app.get("/api/test-airtable", async (req, res) => {
     const apiKey = process.env.AIRTABLE_API_KEY;
 
     if (!baseId || !apiKey) {
-      return res.status(500).json({ error: "Missing Airtable credentials" });
+      return res.status(400).json({ error: "Missing Airtable credentials" });
     }
 
     const tableName = "Stripe Signups";
     const url = `https://api.airtable.com/v0/${baseId}/${encodeURIComponent(tableName)}?maxRecords=1`;
+
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 10000); // 10s timeout
 
     const response = await fetch(url, {
       method: "GET",
@@ -55,10 +71,14 @@ app.get("/api/test-airtable", async (req, res) => {
         Authorization: `Bearer ${apiKey}`,
         "Content-Type": "application/json",
       },
+      signal: controller.signal,
     });
+
+    clearTimeout(timeoutId);
 
     if (!response.ok) {
       const errorText = await response.text();
+      console.error("❌ Airtable API error:", errorText);
       return res.status(response.status).json({
         error: "Airtable API error",
         status: response.status,
@@ -69,53 +89,55 @@ app.get("/api/test-airtable", async (req, res) => {
     const data = await response.json();
     res.json({
       success: true,
-      message: "Airtable connection working",
+      message: "Airtable connection successful",
       recordCount: data.records?.length || 0,
       fields: data.records?.[0]?.fields ? Object.keys(data.records[0].fields) : [],
     });
   } catch (error) {
+    console.error("❌ Airtable test failed:", error.message, error.stack);
     res.status(500).json({ error: "Test failed", message: error.message });
   }
 });
 
 // Stripe webhook endpoint
-app.post(
-  "/webhook",
-  express.raw({ type: "application/json" }),
-  async (req, res) => {
-    console.log("🎯 Webhook hit");
+app.post("/webhook", async (req, res) => {
+  console.log("🎯 Webhook received");
 
-    const sig = req.headers["stripe-signature"];
-    let event;
+  const sig = req.headers["stripe-signature"];
+  let event;
 
-    try {
-      event = stripe.webhooks.constructEvent(req.body, sig, webhookSecret);
-      console.log(`✅ Verified event: ${event.id} ${event.type}`);
-    } catch (err) {
-      console.error("❌ Webhook signature verification failed:", err.message);
-      return res.status(400).send(`Webhook Error: ${err.message}`);
-    }
-
-    try {
-      switch (event.type) {
-        case "checkout.session.completed":
-          await processCheckoutCompleted(event);
-          break;
-        case "customer.subscription.created":
-          console.log("📦 Subscription created:", event.data.object.id);
-          break;
-        default:
-          console.log(`ℹ️ Unhandled event type ${event.type}`);
-      }
-      console.log("✅ Event processed successfully");
-    } catch (err) {
-      console.error("❌ Processing error:", err);
-      return res.status(500).send("Internal Server Error");
-    }
-
-    res.json({ received: true });
+  try {
+    event = stripe.webhooks.constructEvent(req.body, sig, webhookSecret);
+    console.log(`✅ Verified event: ${event.id} ${event.type}`);
+  } catch (err) {
+    console.error("❌ Webhook signature verification failed:", err.message, err.stack);
+    return res.status(400).send(`Webhook Error: ${err.message}`);
   }
-);
+
+  try {
+    switch (event.type) {
+      case "checkout.session.completed":
+        await processCheckoutCompleted(event);
+        break;
+      case "customer.subscription.created":
+        console.log("📦 Subscription created:", event.data.object.id);
+        break;
+      case "customer.subscription.updated":
+        console.log("🔄 Subscription updated:", event.data.object.id);
+        break;
+      case "customer.subscription.deleted":
+        console.log("🗑️ Subscription deleted:", event.data.object.id);
+        break;
+      default:
+        console.log(`ℹ️ Unhandled event type: ${event.type}`);
+    }
+    console.log("✅ Event processed successfully");
+    return res.status(200).json({ received: true });
+  } catch (err) {
+    console.error("❌ Processing error:", err.message, err.stack);
+    return res.status(500).send(`Internal Server Error: ${err.message}`);
+  }
+});
 
 //
 // === Handlers ===
@@ -131,12 +153,13 @@ async function processCheckoutCompleted(event) {
     await storeSubscription(session, customer, subscription);
     console.log("✅ Subscription stored in Airtable");
   } catch (err) {
-    console.error("❌ Checkout processing error:", err);
+    console.error("❌ Checkout processing error:", err.message, err.stack);
+    throw err; // Re-throw to be caught in the webhook handler
   }
 }
 
 //
-// === Airtable integration ===
+// === Airtable Integration ===
 //
 async function storeSubscription(session, customer = null, subscription = null) {
   const baseId = process.env.AIRTABLE_BASE_ID;
@@ -161,17 +184,21 @@ async function storeSubscription(session, customer = null, subscription = null) 
     "Plan Name": subscription?.items?.data[0]?.price?.nickname || subscription?.items?.data[0]?.price?.id,
     "Subscription Status": subscription?.status,
     "Created At": new Date().toISOString(),
-    "Metadata": JSON.stringify({
-      session_metadata: session.metadata || {},
-      subscription_metadata: subscription?.metadata || {},
-      utm_source: session.metadata?.utm_source,
-      utm_medium: session.metadata?.utm_medium,
-      utm_campaign: session.metadata?.utm_campaign,
-      promo_code: session.discount?.coupon?.id,
-    }, null, 2),
+    "Metadata": JSON.stringify(
+      {
+        session_metadata: session.metadata || {},
+        subscription_metadata: subscription?.metadata || {},
+        utm_source: session.metadata?.utm_source,
+        utm_medium: session.metadata?.utm_medium,
+        utm_campaign: session.metadata?.utm_campaign,
+        promo_code: session.discount?.coupon?.id,
+      },
+      null,
+      2
+    ),
   };
 
-  // Remove empty values
+  // Remove undefined or null fields
   Object.keys(fields).forEach((key) => {
     if (fields[key] === undefined || fields[key] === null) {
       delete fields[key];
@@ -181,14 +208,35 @@ async function storeSubscription(session, customer = null, subscription = null) 
   const record = { fields };
   console.log("📤 Inserting record:", JSON.stringify(record, null, 2));
 
-  const res = await fetch(recordsUrl, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({ records: [record] }),
-  });
+  // Retry logic for Airtable API calls
+  const retry = async (fn, retries = 3, delay = 1000) => {
+    for (let i = 0; i < retries; i++) {
+      try {
+        return await fn();
+      } catch (err) {
+        if (i === retries - 1) throw err;
+        console.log(`🔄 Retrying Airtable request (${i + 1}/${retries})...`);
+        await new Promise((resolve) => setTimeout(resolve, delay));
+      }
+    }
+  };
+
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 10000); // 10s timeout
+
+  const res = await retry(() =>
+    fetch(recordsUrl, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ records: [record] }),
+      signal: controller.signal,
+    })
+  );
+
+  clearTimeout(timeoutId);
 
   if (!res.ok) {
     const errorText = await res.text();
@@ -202,14 +250,14 @@ async function storeSubscription(session, customer = null, subscription = null) 
 }
 
 //
-// === Start server ===
+// === Start Server ===
 //
 app.listen(port, "0.0.0.0", () => {
   console.log(`🚀 Server listening on 0.0.0.0:${port}`);
-  console.log("📋 Env check:");
+  console.log("📋 Environment check:");
   console.log("- Stripe key set:", !!process.env.STRIPE_SECRET_KEY);
   console.log("- Webhook secret set:", !!process.env.STRIPE_WEBHOOK_SECRET);
   console.log("- Airtable base set:", !!process.env.AIRTABLE_BASE_ID);
   console.log("- Airtable key set:", !!process.env.AIRTABLE_API_KEY);
-  console.log("✅ Version 2.4 ready");
+  console.log("✅ Version 2.5 ready");
 });
