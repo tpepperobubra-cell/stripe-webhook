@@ -1,5 +1,4 @@
 import express from 'express';
-import bodyParser from 'body-parser';
 import Stripe from 'stripe';
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
@@ -11,11 +10,14 @@ const PORT = process.env.PORT || 3000;
 const processedEvents = new Set();
 const stripeEvents = [];
 
-// Stripe requires raw body for signature verification
-app.post(
-  '/api/webhook',
-  bodyParser.raw({ type: 'application/json' }),
-  async (req, res) => {
+// Use express.raw() for webhook route specifically
+app.use('/api/webhook', express.raw({ type: 'application/json' }));
+
+// Use express.json() for all other routes
+app.use(express.json());
+
+// Stripe webhook endpoint
+app.post('/api/webhook', async (req, res) => {
     const sig = req.headers['stripe-signature'];
     let event;
 
