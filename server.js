@@ -12,6 +12,16 @@ const stripe = new Stripe(process.env.STRIPE_SECRET_KEY, {
 
 const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
 
+// Root health endpoint for Railway healthcheck
+app.get("/", (req, res) => {
+  res.json({
+    status: "healthy",
+    service: "stripe-webhook-server",
+    version: "2.3",
+    timestamp: new Date().toISOString()
+  });
+});
+
 // Health/debug endpoint
 app.get("/api/debug", (req, res) => {
   res.json({
