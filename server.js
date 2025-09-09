@@ -1,6 +1,6 @@
 import express from "express";
 import Stripe from "stripe";
-import { AbortController } from "node-abort-controller"; // For fetch timeouts
+import { AbortController } from "node-abort-controller";
 
 const app = express();
 const port = process.env.PORT || 8080;
@@ -12,31 +12,41 @@ const stripe = new Stripe(process.env.STRIPE_SECRET_KEY, {
 
 const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
 
-// Middleware for parsing webhook raw body
-app.use(
-  "/webhook",
-  express.raw({ type: "application/json" })
-);
-app.use(express.json()); // For other endpoints
+// Middleware
+app.use("/webhook", express.raw({ type: "application/json" }));
+app.use(express.json());
 
 // Graceful shutdown handling
 process.on("SIGTERM", () => {
   console.log("🛑 Received SIGTERM. Performing graceful shutdown...");
-  process.exit(0);
+  server.close(() => {
+    console.log("✅ Server closed. Exiting process...");
+    process.exit(0);
+  });
+});
+
+process.on("SIGINT", () => {
+  console.log("🛑 Received SIGINT. Performing graceful shutdown...");
+  server.close(() => {
+    console.log("✅ Server closed. Exiting process...");
+    process.exit(0);
+  });
 });
 
 // Root health endpoint
 app.get("/", (req, res) => {
+  console.log("🩺 Health check accessed");
   res.status(200).json({
     status: "healthy",
     service: "stripe-webhook-server",
-    version: "2.5", // Updated version
+    version: "2.5.1", // Updated version
     timestamp: new Date().toISOString(),
   });
 });
 
 // Debug endpoint
 app.get("/api/debug", (req, res) => {
+  console.log("🔍 Debug endpoint accessed");
   res.json({
     stripe_key_set: !!process.env.STRIPE_SECRET_KEY,
     webhook_secret_set: !!process.env.STRIPE_WEBHOOK_SECRET,
@@ -45,17 +55,19 @@ app.get("/api/debug", (req, res) => {
     airtable_key_set: !!process.env.AIRTABLE_API_KEY,
     airtable_base_id: process.env.AIRTABLE_BASE_ID?.slice(0, 10) + "..." || "NOT_SET",
     airtable_key_prefix: process.env.AIRTABLE_API_KEY?.slice(0, 10) + "..." || "NOT_SET",
-    version: "2.5",
+    version: "2.5.1",
   });
 });
 
 // Test Airtable connection
 app.get("/api/test-airtable", async (req, res) => {
+  console.log("🧪 Testing Airtable connection");
   try {
     const baseId = process.env.AIRTABLE_BASE_ID;
     const apiKey = process.env.AIRTABLE_API_KEY;
 
     if (!baseId || !apiKey) {
+      console.error("❌ Missing Airtable credentials");
       return res.status(400).json({ error: "Missing Airtable credentials" });
     }
 
@@ -63,7 +75,7 @@ app.get("/api/test-airtable", async (req, res) => {
     const url = `https://api.airtable.com/v0/${baseId}/${encodeURIComponent(tableName)}?maxRecords=1`;
 
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 10000); // 10s timeout
+    const timeoutId = setTimeout(() => controller.abort(), 10000);
 
     const response = await fetch(url, {
       method: "GET",
@@ -87,6 +99,7 @@ app.get("/api/test-airtable", async (req, res) => {
     }
 
     const data = await response.json();
+    console.log("✅ Airtable connection successful");
     res.json({
       success: true,
       message: "Airtable connection successful",
@@ -102,7 +115,6 @@ app.get("/api/test-airtable", async (req, res) => {
 // Stripe webhook endpoint
 app.post("/webhook", async (req, res) => {
   console.log("🎯 Webhook received");
-
   const sig = req.headers["stripe-signature"];
   let event;
 
@@ -154,7 +166,7 @@ async function processCheckoutCompleted(event) {
     console.log("✅ Subscription stored in Airtable");
   } catch (err) {
     console.error("❌ Checkout processing error:", err.message, err.stack);
-    throw err; // Re-throw to be caught in the webhook handler
+    throw err;
   }
 }
 
@@ -166,6 +178,7 @@ async function storeSubscription(session, customer = null, subscription = null) 
   const apiKey = process.env.AIRTABLE_API_KEY;
 
   if (!baseId || !apiKey) {
+    console.error("❌ Missing Airtable credentials");
     throw new Error("Missing Airtable credentials");
   }
 
@@ -208,7 +221,7 @@ async function storeSubscription(session, customer = null, subscription = null) 
   const record = { fields };
   console.log("📤 Inserting record:", JSON.stringify(record, null, 2));
 
-  // Retry logic for Airtable API calls
+  // Retry logic
   const retry = async (fn, retries = 3, delay = 1000) => {
     for (let i = 0; i < retries; i++) {
       try {
@@ -222,7 +235,7 @@ async function storeSubscription(session, customer = null, subscription = null) 
   };
 
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 10000); // 10s timeout
+  const timeoutId = setTimeout(() => controller.abort(), 10000);
 
   const res = await retry(() =>
     fetch(recordsUrl, {
@@ -252,12 +265,12 @@ async function storeSubscription(session, customer = null, subscription = null) 
 //
 // === Start Server ===
 //
-app.listen(port, "0.0.0.0", () => {
+const server = app.listen(port, "0.0.0.0", () => {
   console.log(`🚀 Server listening on 0.0.0.0:${port}`);
   console.log("📋 Environment check:");
   console.log("- Stripe key set:", !!process.env.STRIPE_SECRET_KEY);
   console.log("- Webhook secret set:", !!process.env.STRIPE_WEBHOOK_SECRET);
   console.log("- Airtable base set:", !!process.env.AIRTABLE_BASE_ID);
   console.log("- Airtable key set:", !!process.env.AIRTABLE_API_KEY);
-  console.log("✅ Version 2.5 ready");
+  console.log("✅ Version 2.5.1 ready");
 });
